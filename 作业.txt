@@ -1,29 +1,69 @@
-1:select a.s_id,a.s_score,b.s_name,b.s_birth,b.s_sex from(select a.s_id,a.s_score from score a left join score b on a.s_id=b.s_id and a.c_id='1' and b.c_id = '2' and a.s_score>b.s_score where b.s_id is not null) a join student b on a.s_id=b.s_id;
+1、查询"01"课程比"02"课程成绩高的学生的信息及课程分数
+select a.s_id,a.s_score,b.s_name,b.s_birth,b.s_sex from 
+(select a.s_id,a.s_score from score a left 
+join score b on a.s_id=b.s_id and a.c_id='1' and b.c_id = '2' and a.s_score>b.s_score where b.s_id is not null) 
+a join student b on a.s_id=b.s_id;
 
-2:select a.s_id,a.s_score,b.s_name,b.s_birth,b.s_sex from(select a.s_id,a.s_score from score a left join score b on a.s_id=b.s_id and a.c_id='1' and b.c_id = '2' and a.s_score<b.s_score where b.s_id is not null) a join student b on a.s_id=b.s_id;
 
-3:select a.s_id,b.s_name,a.avg_score from (select s_id,avg(s_score) avg_score from score group by s_id) a ,student b where a.s_id=b.s_id and a.avg_score >=60;
+2、查询"01"课程比"02"课程成绩低的学生的信息及课程分数
+select a.s_id,a.s_score,b.s_name,b.s_birth,b.s_sex from 
+(select a.s_id,a.s_score from score a left 
+join score b on a.s_id=b.s_id and a.c_id='1' and b.c_id = '2' and a.s_score<b.s_score where b.s_id is not null) 
+a join student b on a.s_id=b.s_id;
 
-4:select * from(select a.s_id,a.s_name,if(b.avg_score is null,0,b.avg_score) avg_score from student a left join (select s_id,avg(s_score) avg_score from score group by s_id) b on a.s_id = b.s_id) a where a.avg_score<60 ;
+3、查询平均成绩大于等于60分的同学的学生编号和学生姓名和平均成绩
+select a.s_id,b.s_name,a.avg_score from (select s_id,avg(s_score) avg_score from score group by s_id)
+ a ,student b where a.s_id=b.s_id and a.avg_score >=60;
 
-5:select  a.s_id,a.s_name,if(b.sum_course is null,0,b.sum_course) sum_course ,if(b.sum_course is null,0,b.sum_course) sum_course from student a left join (select s_id,sum(s_score) sum_score,count(c_id) sum_course from score group by s_id)b on a.s_id= b.s_id;
+4、查询平均成绩小于60分的同学的学生编号和学生姓名和平均成绩(包括有成绩的和无成绩的)
+select * from(
+select a.s_id,a.s_name,if(b.avg_score is null,0,b.avg_score) avg_score from student a left join 
+(select s_id,avg(s_score) avg_score from score group by s_id) b on a.s_id = b.s_id) a where a.avg_score<60 ;
 
-6:select count(*) num_li from teacher where t_name regexp '李';
 
-7:select b.* from (select a.s_id from score a,(select a.c_id from course a, (select t_id from teacher where t_name='张三')b where a.t_id = b.t_id) b  where a.c_id=b.c_id)a ,student b where a.s_id=b.s_id;
+5、查询所有同学的学生编号、学生姓名、选课总数、所有课程的总成绩
+select  a.s_id,a.s_name,if(b.sum_course is null,0,b.sum_course) sum_course ,if(b.sum_course is null,0,b.sum_course) sum_course from student a left join (select s_id,sum(s_score) sum_score,count(c_id) sum_course 
+from score group by s_id)b on a.s_id= b.s_id;
 
-8:select a.* from student a left join (select a.s_id from score a,(select a.c_id from course a, (select t_id from teacher where t_name='张三')b where a.t_id = b.t_id) b  where a.c_id=b.c_id) b on a.s_id = b.s_id where b.s_id is null;
+6、查询"李"姓老师的数量
+select count(*) num_li from teacher where t_name regexp '李';
 
-9:select a.* from student a ,(select a.s_id from (select s_id from score where c_id ='1') a left join (select s_id from score where c_id ='2')b on a.s_id = b.s_id where b.s_id is not null) b where a.s_id=b.s_id;
+7、查询学过"张三"老师授课的同学的信息
+select b.* from (select a.s_id from score a,(select a.c_id from course a, (select t_id from teacher where t_name='张三')b 
+where a.t_id = b.t_id) b  where a.c_id=b.c_id)a ,student b where a.s_id=b.s_id;
+
+8、查询没学过"张三"老师授课的同学的信息
+select a.* from student a left join (select a.s_id from score a,(select a.c_id from course a, (select t_id from teacher where t_name='张三')b 
+where a.t_id = b.t_id) b  where a.c_id=b.c_id) b on a.s_id = b.s_id where b.s_id is null;
+
+9、查询学过编号为"01"并且也学过编号为"02"的课程的同学的信息
+select a.* from student a ,(select a.s_id from (select s_id from score where c_id ='1') a left join (select s_id from score where c_id ='2')b
+ on a.s_id = b.s_id where b.s_id is not null) b where a.s_id=b.s_id;
  
-10:select a.* from student a ,(select a.s_id from (select s_id from score where c_id ='1') a left join (select s_id from score where c_id ='2')b on a.s_id = b.s_id where b.s_id is null) b where a.s_id=b.s_id;
+10、查询学过编号为"01"但是没有学过编号为"02"的课程的同学的信息
+select a.* from student a ,(select a.s_id from (select s_id from score where c_id ='1') a left join (select s_id from score where c_id ='2')b
+ on a.s_id = b.s_id where b.s_id is null) b where a.s_id=b.s_id;
 
-11:select a.s_id,a.s_name,a.s_birth,a.s_sex from (select a.*,if(b.count_course is null,0,b.count_course) count_course from student a left join (select s_id,count(*) count_course from score group by s_id)b  on a.s_id=b.s_id) a where a.count_course <4;
+11、查询没有学全所有课程的同学的信息
+select a.s_id,a.s_name,a.s_birth,a.s_sex from (select a.*,if(b.count_course is null,0,b.count_course) count_course 
+ from student a left join (select s_id,count(*) count_course from score group by s_id)b  on a.s_id=b.s_id) a 
+ where a.count_course <4;
 
-12:select a.* from student a ,(select distinct b.s_id from (select s_id,c_id from score where s_id ='1')a ,(select s_id,c_id from score where s_id !='1')b where a.c_id =b.c_id) b where a.s_id = b.s_id;
+12、查询至少有一门课与学号为"01"的同学所学相同的同学的信息
 
-13:select b.* from (select b.s_id  from (select s_id,concat_ws(',',collect_set(c_id)) counses from score group by s_id) a ,(select s_id,concat_ws(',',collect_set(c_id)) counses from score group by s_id) b where a.counses=b.counses and a.s_id='1' and b.s_id!='1') a  left join student b on a.s_id = b.s_id ;
+select a.* from student a ,(select distinct b.s_id from (select s_id,c_id from score where s_id ='1')a ,
+(select s_id,c_id from score where s_id !='1')b where a.c_id =b.c_id) b where a.s_id = b.s_id;
 
-14:select a.s_name from student a left join (select s_id from score where c_id in (select c_id from course where t_id in (select t_id from teacher where t_name = '张三')))b on  a.s_id = b.s_id where b.s_id is null;
+13、查询和"01"号的同学学习的课程完全相同的其他同学的信息
+select b.* from (select b.s_id  from (select s_id,concat_ws(',',collect_set(c_id)) counses 
+from score group by s_id) a ,(select s_id,concat_ws(',',collect_set(c_id)) counses 
+from score group by s_id) b where a.counses=b.counses and a.s_id='1' and b.s_id!='1') a  left join student b on a.s_id = b.s_id ;
 
-15:select a.s_id,b.s_name,a.avg_score from (select s_id,avg_score from (select s_id,sum(case when s_score < 60 then 1 else 0 end) sum_count,avg(s_score) avg_score from score group by s_id) a where sum_count >=2) a left join student b on a.s_id = b.s_id;
+14、查询没学过"张三"老师讲授的任一门课程的学生姓名
+select a.s_name from student a left join (select s_id from score where c_id in (select c_id from course 
+where t_id in (select t_id from teacher where t_name = '张三')))b on  a.s_id = b.s_id where b.s_id is null;
+
+15、查询两门及其以上不及格课程的同学的学号，姓名及其平均成绩
+select a.s_id,b.s_name,a.avg_score from (
+select s_id,avg_score from (select s_id,sum(case when s_score < 60 then 1 else 0 end) sum_count,
+avg(s_score) avg_score from score group by s_id) a where sum_count >=2) a left join student b on a.s_id = b.s_id;
