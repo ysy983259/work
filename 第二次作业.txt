@@ -1,0 +1,85 @@
+import org.apache.spark.SparkContext
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.{DataFrame, SparkSession}
+
+case class Person(classes:String,name:String,age:String,sex:String,subject:String,grade:String)
+
+object SparkSqlread {
+  def main(args: Array[String]): Unit = {
+      val spark = SparkSession.builder()
+        .appName("readfile")
+        .config("spark.serializer","org.apache.spark.serializer.KryoSerializer")
+        .master("local[*]")
+        .getOrCreate()
+
+//    val df:DataFrame = spark.read.text("hdfs://bigdata01:8020/input_count/test.txt")
+//    df.printSchema
+//    df.show()
+    import spark.implicits._
+
+    val sc: SparkContext = spark.sparkContext
+    sc.setLogLevel("warn")
+//
+    val rdd1:RDD[Array[String]] = sc.textFile("hdfs://bigdata01:8020/input_count/test.txt")
+      .map(x => x.split(" "))
+      .mapPartitionsWithIndex{
+            //文件txt，跳过第一行
+      (idx,iter)=>if(idx == 0 ) iter.drop(1) else iter
+    }
+    val personRDD:RDD[Person]=rdd1.map(x => Person(x(0),x(1),x(2),x(3),x(4),x(5)))
+
+    val df = personRDD.toDF
+    df.show()
+
+    df.createTempView("student")
+    //2. 一共有多少个小于20岁的人参加考试？
+    spark.sql("select count(1)  from (select name from student where age <20 group by name) ").show()
+
+    //3. 一共有多少个等于20岁的人参加考试？
+    spark.sql("select count(1) from (select name from student where age =20 group by name)").show()
+
+    //4. 一共有多少个大于20岁的人参加考试？
+    spark.sql("select count(1) from (select name from student where age >20 group by name)").show()
+//    //5. 一共有多个男生参加考试？
+    spark.sql("select count(1) from (select name from student where sex ='男' group by name)").show()
+//    //6. 一共有多少个女生参加考试？
+    spark.sql("select count(1) from (select name from student where sex ='女' group by name)").show()
+//    //7. 12班有多少人参加考试？
+    spark.sql("select count(1) from (select name from student where classes =12 group by name)").show()
+//    //8. 13班有多少人参加考试？
+    spark.sql("select count(1) from (select name from student where classes =13 group by name)").show()
+//    //9. 语文科目的平均成绩是多少？
+    spark.sql("select avg(grade) from student where subject='chinese'").show()
+//    //10. 数学科目的平均成绩是多少？
+    spark.sql("select avg(grade) from student where subject='math'").show()
+//    //11. 英语科目的平均成绩是多少？
+    spark.sql("select avg(grade) from student where subject='english'").show()
+//    //12. 每个人平均成绩是多少？
+    spark.sql("select name,avg(grade) from student group by name").show()
+//    //13. 12班平均成绩是多少？
+    spark.sql("select avg(sum_grade) from (select name,sum(grade) sum_grade from student where classes=12 group by name)").show()
+    //14. 12班男生平均总成绩是多少？
+    spark.sql("select avg(sum_grade) from( select name,sum(grade) sum_grade from student where classes=12 and sex='男' group by name)").show()
+    //15. 12班女生平均总成绩是多少？
+    spark.sql("select avg(sum_grade) from( select name,sum(grade) sum_grade from student where classes=12 and sex='女' group by name)").show()
+    //16. 13班平均成绩是多少？
+    spark.sql("select avg(sum_grade) from (select name,sum(grade) sum_grade from student where classes=13 group by name)").show()
+    //17. 13班男生平均总成绩是多少？
+    spark.sql("select avg(sum_grade) from( select name,sum(grade) sum_grade from student where classes=13 and sex='男' group by name)").show()
+    //18. 13班女生平均总成绩是多少？
+    spark.sql("select avg(sum_grade) from( select name,sum(grade) sum_grade from student where classes=13 and sex='女' group by name)").show()
+    //19. 全校语文成绩最高分是多少？
+    spark.sql("select max(grade)  from student where subject='chinese' ").show()
+    //20. 12班语文成绩最低分是多少？
+    spark.sql("select min(grade)  from student where subject='chinese' and classes=12").show()
+    //21. 13班数学最高成绩是多少？
+    spark.sql("select max(grade)  from student where subject='math' and classes=13").show()
+    //22. 总成绩大于150分的12班的女生有几个？
+    spark.sql("select count(1) from( select name,sum(grade) sum_grade from student where classes=12 and sex='女' and classes=12 group by name) where sum_grade>150 ").show()
+    //23. 总成绩大于150分，且数学大于等于70，且年龄大于等于19岁的学生的平均成绩是多少？
+    spark.sql("select avg(b.sum_grade)  from (select name from (select name,grade from student where subject='math' and age >=19) where grade >=70)a " +
+      "join (select name,sum(grade) sum_grade from student group by name)b" +
+      " on a.name=b.name where b.sum_grade>150").show()
+    spark.stop()
+  }
+}
