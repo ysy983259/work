@@ -1,0 +1,200 @@
+实体类
+package cn.flink.code.test;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class userbehavior {
+    private Long userId;
+    private Long itrmid;
+    private int categoryld;
+    private String behavior;
+    private Long timestamptime;
+}
+
+输出类
+package cn.flink.code.test;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@Builder
+@NoArgsConstructor
+@AllArgsConstructor
+public class ItemCount {
+    public Long itemId;
+    public Long windowEnd;
+    public Long viewCount;
+
+    public static ItemCount of(long itemId, long windowEnd, long viewCount) {
+        ItemCount result = new ItemCount();
+        result.itemId = itemId;
+        result.windowEnd = windowEnd;
+        result.viewCount = viewCount;
+        return result;
+    }
+
+}
+
+package cn.flink.code.test;
+
+import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.java.tuple.Tuple;
+import org.apache.flink.api.java.tuple.Tuple1;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
+import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.util.Collector;
+import scala.Tuple2;
+
+import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+public class thirdword {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment environment = StreamExecutionEnvironment.getExecutionEnvironment();
+        DataStreamSource<String> socketTextStream = environment.socketTextStream("bigdata01", 9999);
+        SingleOutputStreamOperator<userbehavior> userbehavior = socketTextStream.map(new MapFunction<String, userbehavior>() {
+            @Override
+            public userbehavior map(String s) throws Exception {
+                String[] words = s.split(",");
+                return new userbehavior(Long.parseLong(words[0]), Long.parseLong(words[1]),Integer.parseInt(words[2]), words[3], Long.parseLong(words[4]));
+            }
+        }).filter(new FilterFunction<cn.flink.code.test.userbehavior>() {
+            @Override
+            public boolean filter(cn.flink.code.test.userbehavior userbehavior) throws Exception {
+                return userbehavior.getBehavior().equals("pv");
+            }
+        });
+
+        SingleOutputStreamOperator<ItemCount> itemId = userbehavior.map(new MapFunction<userbehavior, Tuple2<Long, Integer>>() {
+                    @Override
+                    public Tuple2<Long, Integer> map(cn.flink.code.test.userbehavior userbehavior) throws Exception {
+                        return new Tuple2<Long, Integer>(userbehavior.getItrmid(), 1);
+                    }
+                }).keyBy("itemId").window(SlidingEventTimeWindows.of(Time.hours(1), Time.minutes(5)))
+                .aggregate(new CountAgg(), new WindowResult());
+
+        SingleOutputStreamOperator<String> processDS = itemId.keyBy("windowEnd")
+                .process(new ItemCountProcessFunc(3));
+
+        //5.打印结果并执行
+        processDS.print();
+        environment.execute();
+
+    }
+
+    private static class CountAgg implements AggregateFunction<Tuple2<Long,Integer>,Integer,Integer> {
+        @Override
+        public Integer createAccumulator() {
+            return 0;
+        }
+
+        @Override
+        public Integer add(Tuple2<Long,Integer> value,Integer a) {
+            return a+1;
+        }
+
+        @Override
+        public Integer getResult(Integer a) {
+            return a;
+        }
+
+        @Override
+        public Integer merge(Integer a, Integer b) {
+            return a+b;
+        }
+
+    }
+
+
+    private static class WindowResult implements WindowFunction<Integer, ItemCount, Tuple, TimeWindow> {
+
+
+
+        @Override
+        public void apply(Tuple key, TimeWindow window, Iterable<Integer> aggregateResult, Collector<ItemCount> collector) throws Exception {
+            Long itemId = (Long) ((Tuple1) key).f0;
+            Long count = Long.valueOf(aggregateResult.iterator().next());
+            collector.collect(ItemCount.of(itemId, window.getEnd(), count));
+        }
+    }
+
+    public static class ItemCountProcessFunc extends KeyedProcessFunction<String,ItemCount,String> {
+        //定义构造器可以按入参取排名
+        private Integer topN;
+        public ItemCountProcessFunc(Integer topN) {
+            this.topN = topN;
+        }
+
+        //使用liststatus并初始化
+        private ListState <ItemCount>listState;
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            listState= getRuntimeContext()
+                    .getListState(new ListStateDescriptor<ItemCount>("list-state",ItemCount.class));
+        }
+        //定时器
+        @Override
+        public void processElement(ItemCount value, Context ctx, Collector<String> out) throws Exception {
+            listState.add(value);
+//            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+//            ctx.timerService().registerEventTimeTimer(sdf.parse(String.valueOf(value.getTime())).getTime()+1000L);
+            ctx.timerService().registerEventTimeTimer(value.getWindowEnd()+1);
+        }
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+            List<ItemCount> allItems = new ArrayList<>();
+            for (ItemCount item : listState.get()) {
+                allItems.add(item);
+            }
+            // 提前清除状态中的数据，释放空间
+            listState.clear();
+            // 按照点击量从大到小排序
+            allItems.sort(new Comparator<ItemCount>() {
+                @Override
+                public int compare(ItemCount o1, ItemCount o2) {
+                    return (int) (o2.viewCount - o1.viewCount);
+                }
+            });
+            // 将排名信息格式化成 String, 便于打印
+            StringBuilder result = new StringBuilder();
+            result.append("====================================\n");
+            result.append("时间: ").append(new Timestamp(timestamp - 1)).append("\n");
+            for (int i = 0; i < topN; i++) {
+                ItemCount currentItem = allItems.get(i);
+                // No1:  商品ID=12224  浏览量=2413
+                result.append("No").append(i).append(":")
+                        .append("  商品ID=").append(currentItem.itemId)
+                        .append("  浏览量=").append(currentItem.viewCount)
+                        .append("\n");
+            }
+            result.append("====================================\n\n");
+
+            // 控制输出频率，模拟实时滚动结果
+            Thread.sleep(1000);
+
+            out.collect(result.toString());
+        }}
+}
