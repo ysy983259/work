@@ -1,200 +1,383 @@
-实体类
-package cn.flink.code.test;
+import java.sql.Timestamp
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import org.apache.flink.api.common.functions.AggregateFunction
+import org.apache.flink.api.common.state.{ListState, ListStateDescriptor}
+import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
+import org.apache.flink.api.scala._
+import org.apache.flink.configuration.Configuration
+import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
+import org.apache.flink.streaming.api.scala.function.WindowFunction
+import org.apache.flink.streaming.api.windowing.time.Time
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow
+import org.apache.flink.util.Collector
 
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-public class userbehavior {
-    private Long userId;
-    private Long itrmid;
-    private int categoryld;
-    private String behavior;
-    private Long timestamptime;
+import scala.collection.mutable.ListBuffer
+
+//640533,3168550,4719814,pv,1511690399
+//定义输出数据的样例类
+case class UserBehavior(UserID:Long,itemId:Long,categoryId:Int,behavior:String,timestamp:Long)
+//定义窗口聚合结果样例类
+case class ItemViewCount(itemId:Long,windowEnd:Long,count:Long)
+
+object HotItems {
+  def main(args: Array[String]): Unit = {
+    //1.创建执行程序
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setParallelism(1)
+    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+
+    //2.读取数据
+    val dataStream = env.readTextFile("D:\\idea\\flinkUser\\HotItemsAnalysis\\src\\main\\resources\\UserBehavior.csv")
+      .map(data=>{
+        val dataArray = data.split(",")
+        UserBehavior(dataArray(0).trim.toLong,dataArray(1).trim.toLong,dataArray(2).trim.toInt,dataArray(3).trim,
+          dataArray(4).trim.toLong)
+      })
+      //*1000  要看是不是秒   秒*1000
+      .assignAscendingTimestamps(_.timestamp*1000L)
+
+    //3.transform 处理数据
+    val processedStream = dataStream
+      .filter(_.behavior == "pv")
+      .keyBy(_.itemId)
+      .timeWindow(Time.hours(1),Time.minutes(5))
+      .aggregate(new CountAgg(),new WindowResult())
+      .keyBy(_.windowEnd)
+      .process(new TopNHotItems(3))
+
+
+
+    //4.sink控制台输出
+    processedStream.print()
+
+    env.execute("hot items job")
+  }
+
+}
+//自定义预聚合函数
+class CountAgg() extends AggregateFunction[UserBehavior,Long,Long]{
+  override def createAccumulator(): Long = 0L
+
+  override def add(in: UserBehavior, acc: Long): Long = acc + 1
+  
+  override def getResult(acc: Long): Long = acc
+
+  override def merge(acc: Long, acc1: Long): Long = acc + acc1
+}
+//扩展 ---自定义预聚合函数计算平均数
+class AverageAgg() extends AggregateFunction[UserBehavior,(Long,Int),Double]{
+  override def createAccumulator(): (Long, Int) = (0L,0)
+
+  override def add(in: UserBehavior, acc: (Long, Int)): (Long, Int) = (acc._1 + in.timestamp,acc._2 + 1)
+
+  override def getResult(acc: (Long, Int)): Double = acc._1/acc._2
+
+  override def merge(acc: (Long, Int), acc1: (Long, Int)): (Long, Int) = (acc._1+acc1._1 ,acc._2+acc1._2)
+}
+//自定义窗口函数，输出ItemViewCount   第一个Long是预聚合最终输出的long  第三个long是ItemId
+class WindowResult() extends WindowFunction[Long,ItemViewCount,Long,TimeWindow]{
+  override def apply(key: Long, window: TimeWindow, input: Iterable[Long],
+                     out: Collector[ItemViewCount]): Unit = {
+    out.collect(ItemViewCount(key,window.getEnd,input.iterator.next()))
+  }
+}
+//自定义的处理函数   第一个是windowEnd所以是long
+class TopNHotItems(topsize:Int) extends KeyedProcessFunction[Long,ItemViewCount,String]{
+
+  private var itemState:ListState[ItemViewCount] = _
+
+  override def open(parameters: Configuration): Unit = {
+    itemState = getRuntimeContext.getListState(new ListStateDescriptor[ItemViewCount]("item-state",
+      classOf[ItemViewCount]))
+  }
+  override def processElement(i: ItemViewCount, context: KeyedProcessFunction
+    [Long, ItemViewCount, String]#Context, collector: Collector[String]): Unit = {
+    //把每条数据存入状态列表
+    itemState.add(i)
+    //注册一个定时器  +1 是延迟时间
+    context.timerService().registerEventTimeTimer(i.windowEnd + 1)
+  }
+
+  override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[Long, ItemViewCount, String]
+    #OnTimerContext, out: Collector[String]): Unit = {
+    //将所有state中的数据取出，放入到一个list buffer中
+    val allItems:ListBuffer[ItemViewCount] = new ListBuffer()
+    //将所有state中的数据取出，放入到一个list buffer中
+    import scala.collection.JavaConversions._
+    for (item <- itemState.get()){
+      allItems += item
+    }
+    //按照Count大小排序  并取前N个   sortBy是升序
+    val sortedItems = allItems.sortBy(_.count)(Ordering.Long.reverse).take(topsize)
+
+    //清空状态   如果不想要下面的格式可以out.collect(sortedItems.toString())输出
+    //UserBehavior(960222,4545844,2892802,pv,1511679926)
+    itemState.clear()
+    out.collect(sortedItems.toString())
+
+    //将排名结果格式化输出  -1是之前注册定时器+1
+    val result:StringBuilder = new StringBuilder()
+    result.append("时间：").append(new Timestamp(timestamp-1)).append("\n")
+    //输出每一个商品信息
+    for (i <- sortedItems.indices){
+      val currentItem = sortedItems(i)
+      result.append("No").append(i+1).append(":")
+        .append("商品ID =").append(currentItem.itemId)
+        .append("浏览量").append(currentItem.count)
+        .append("\n")
+    }
+    result.append("=====================")
+    //控制输出频率
+    Thread.sleep(1000)
+
+    out.collect(result.toString())
+
+  }
+
 }
 
-输出类
-package cn.flink.code.test;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+2----------------
+import org.apache.flink.api.common.functions.AggregateFunction
+import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.scala._
+import org.apache.flink.streaming.api.scala.function.WindowFunction
+import org.apache.flink.streaming.api.windowing.time.Time
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow
+import org.apache.flink.util.Collector
 
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-public class ItemCount {
-    public Long itemId;
-    public Long windowEnd;
-    public Long viewCount;
+//定义输入输出样例类
+case class UserBehavior(userId:Long,itemId:Long,categoryId:Int,behavior:String,timestamp:Long)
+case class PageViewCount(windowEnd:Long,count:Long)
 
-    public static ItemCount of(long itemId, long windowEnd, long viewCount) {
-        ItemCount result = new ItemCount();
-        result.itemId = itemId;
-        result.windowEnd = windowEnd;
-        result.viewCount = viewCount;
-        return result;
-    }
+object PageView {
+  def main(args: Array[String]): Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setParallelism(1)
+    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
 
+    //从文件中读取文件
+    val inputStream = env.readTextFile("D:\\idea\\UserBehaviorAnalysis\\NetworkFlowAnalysis\\src\\main\\resources\\UserBehavior.csv")
+    val dataStream = inputStream
+      .map(data => {
+        val dataArray = data.split(",")
+        UserBehavior(dataArray(0).toLong, dataArray(1).toLong, dataArray(2).toInt, dataArray(3), dataArray(4).toLong)
+      })
+      .assignAscendingTimestamps(_.timestamp * 1000L)
+
+    //分配key，包装成二元组开窗聚合
+    val pvStream = dataStream
+      .filter(_.behavior == "pv")
+      .map(data => ("pv", 1L))
+      .keyBy(_._1)
+      .timeWindow(Time.hours(1))
+      .aggregate(new PvCountAgg(), new PvCountResult())
+    
+    pvStream.print()
+    env.execute("pv job")
+  }
+}
+//自定义聚合函数
+class PvCountAgg() extends AggregateFunction[(String,Long),Long,Long]{
+  override def createAccumulator(): Long = 0L
+
+  override def add(value: (String, Long), accumulator: Long): Long = accumulator + 1
+
+  override def getResult(accumulator: Long): Long = accumulator
+
+  override def merge(a: Long, b: Long): Long = a + b
+}
+//自定义窗口函数，把窗口信息包装到样例类类型输出
+class PvCountResult() extends WindowFunction[Long,PageViewCount,String,TimeWindow]{
+  override def apply(key: String, window: TimeWindow, input: Iterable[Long], out: Collector[PageViewCount]): Unit = {
+    out.collect(PageViewCount(window.getEnd,input.head))
+  }
 }
 
-package cn.flink.code.test;
+3------------------
+import org.apache.flink.api.common.state.{ListState, ListStateDescriptor}
+import org.apache.flink.api.java.tuple.Tuple
+import org.apache.flink.streaming.api.scala._
+import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
+import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
+import org.apache.flink.util.Collector
 
-import org.apache.flink.api.common.functions.AggregateFunction;
-import org.apache.flink.api.common.functions.FilterFunction;
-import org.apache.flink.api.common.functions.MapFunction;
-import org.apache.flink.api.common.state.ListState;
-import org.apache.flink.api.common.state.ListStateDescriptor;
-import org.apache.flink.api.java.tuple.Tuple;
-import org.apache.flink.api.java.tuple.Tuple1;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.streaming.api.datastream.DataStreamSource;
-import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
-import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
-import org.apache.flink.streaming.api.windowing.assigners.SlidingEventTimeWindows;
-import org.apache.flink.streaming.api.windowing.time.Time;
-import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
-import org.apache.flink.util.Collector;
-import scala.Tuple2;
+import scala.collection.mutable.ListBuffer
 
-import java.sql.Timestamp;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
-
-public class thirdword {
-    public static void main(String[] args) throws Exception {
-        StreamExecutionEnvironment environment = StreamExecutionEnvironment.getExecutionEnvironment();
-        DataStreamSource<String> socketTextStream = environment.socketTextStream("bigdata01", 9999);
-        SingleOutputStreamOperator<userbehavior> userbehavior = socketTextStream.map(new MapFunction<String, userbehavior>() {
-            @Override
-            public userbehavior map(String s) throws Exception {
-                String[] words = s.split(",");
-                return new userbehavior(Long.parseLong(words[0]), Long.parseLong(words[1]),Integer.parseInt(words[2]), words[3], Long.parseLong(words[4]));
-            }
-        }).filter(new FilterFunction<cn.flink.code.test.userbehavior>() {
-            @Override
-            public boolean filter(cn.flink.code.test.userbehavior userbehavior) throws Exception {
-                return userbehavior.getBehavior().equals("pv");
-            }
-        });
-
-        SingleOutputStreamOperator<ItemCount> itemId = userbehavior.map(new MapFunction<userbehavior, Tuple2<Long, Integer>>() {
-                    @Override
-                    public Tuple2<Long, Integer> map(cn.flink.code.test.userbehavior userbehavior) throws Exception {
-                        return new Tuple2<Long, Integer>(userbehavior.getItrmid(), 1);
-                    }
-                }).keyBy("itemId").window(SlidingEventTimeWindows.of(Time.hours(1), Time.minutes(5)))
-                .aggregate(new CountAgg(), new WindowResult());
-
-        SingleOutputStreamOperator<String> processDS = itemId.keyBy("windowEnd")
-                .process(new ItemCountProcessFunc(3));
-
-        //5.打印结果并执行
-        processDS.print();
-        environment.execute();
-
-    }
-
-    private static class CountAgg implements AggregateFunction<Tuple2<Long,Integer>,Integer,Integer> {
-        @Override
-        public Integer createAccumulator() {
-            return 0;
+object LoginFail {
+        def main(args: Array[String]): Unit = {
+        		//注意事项1
+                val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
+                //注意事项2
+                env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+                env.setParallelism(1)
+        		//注意事项3
+                env.fromCollection(List(
+                        LoginEvent(1, "192.168.0.1", "fail", 1558430842),
+                        LoginEvent(1, "192.168.0.2", "fail", 1558430843),
+                        LoginEvent(1, "192.168.0.3", "fail", 1558430844),
+                        LoginEvent(1, "192.168.0.1", "fail", 1558430845),
+                        LoginEvent(1, "192.168.0.2", "fail", 1558430846),
+                        LoginEvent(1, "192.168.0.3", "fail", 1558430847),
+                        LoginEvent(1, "192.168.0.1", "fail", 1558430848),
+                        LoginEvent(1, "192.168.0.2", "fail", 1558430849),
+                        LoginEvent(1, "192.168.0.3", "fail", 1558430888),
+                        LoginEvent(2, "192.168.10.10", "success", 1558430845)
+                )).assignAscendingTimestamps(_.eventTime * 1000)//注意事项4 和 扩展内容1
+                        .keyBy("userId")//针对同一用户，分流计算 扩展内容2
+                        .process(new MatchFunction)
+                        .print()
+                
+                env.execute("Login Fail Test")
         }
+        //这里采用实现低阶ProcessFunction方式
+        class MatchFunction extends KeyedProcessFunction[Tuple, LoginEvent, String]{
+        		//注意事项5 和 扩展内容3
+                lazy val loginState : ListState[LoginEvent] = getRuntimeContext.getListState(
+                        new ListStateDescriptor[LoginEvent]("saved login", classOf[LoginEvent])
+                )
 
-        @Override
-        public Integer add(Tuple2<Long,Integer> value,Integer a) {
-            return a+1;
-        }
-
-        @Override
-        public Integer getResult(Integer a) {
-            return a;
-        }
-
-        @Override
-        public Integer merge(Integer a, Integer b) {
-            return a+b;
-        }
-
-    }
-
-
-    private static class WindowResult implements WindowFunction<Integer, ItemCount, Tuple, TimeWindow> {
-
-
-
-        @Override
-        public void apply(Tuple key, TimeWindow window, Iterable<Integer> aggregateResult, Collector<ItemCount> collector) throws Exception {
-            Long itemId = (Long) ((Tuple1) key).f0;
-            Long count = Long.valueOf(aggregateResult.iterator().next());
-            collector.collect(ItemCount.of(itemId, window.getEnd(), count));
-        }
-    }
-
-    public static class ItemCountProcessFunc extends KeyedProcessFunction<String,ItemCount,String> {
-        //定义构造器可以按入参取排名
-        private Integer topN;
-        public ItemCountProcessFunc(Integer topN) {
-            this.topN = topN;
-        }
-
-        //使用liststatus并初始化
-        private ListState <ItemCount>listState;
-        @Override
-        public void open(Configuration parameters) throws Exception {
-            listState= getRuntimeContext()
-                    .getListState(new ListStateDescriptor<ItemCount>("list-state",ItemCount.class));
-        }
-        //定时器
-        @Override
-        public void processElement(ItemCount value, Context ctx, Collector<String> out) throws Exception {
-            listState.add(value);
-//            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-//            ctx.timerService().registerEventTimeTimer(sdf.parse(String.valueOf(value.getTime())).getTime()+1000L);
-            ctx.timerService().registerEventTimeTimer(value.getWindowEnd()+1);
-        }
-        @Override
-        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
-            List<ItemCount> allItems = new ArrayList<>();
-            for (ItemCount item : listState.get()) {
-                allItems.add(item);
-            }
-            // 提前清除状态中的数据，释放空间
-            listState.clear();
-            // 按照点击量从大到小排序
-            allItems.sort(new Comparator<ItemCount>() {
-                @Override
-                public int compare(ItemCount o1, ItemCount o2) {
-                    return (int) (o2.viewCount - o1.viewCount);
+                override def processElement(
+                                                   login: LoginEvent,
+                                                   context: KeyedProcessFunction[Tuple, LoginEvent, String]#Context,
+                                                   collector: Collector[String]): Unit = {
+                        if (login.eventType.equals("fail")) {
+                                loginState.add(login)
+                        }
+                        //注册定时器，延时2秒,触发onTimer方法
+                        val runTimer = login.eventTime +  2000L
+                        context.timerService().registerEventTimeTimer(runTimer)
                 }
-            });
-            // 将排名信息格式化成 String, 便于打印
-            StringBuilder result = new StringBuilder();
-            result.append("====================================\n");
-            result.append("时间: ").append(new Timestamp(timestamp - 1)).append("\n");
-            for (int i = 0; i < topN; i++) {
-                ItemCount currentItem = allItems.get(i);
-                // No1:  商品ID=12224  浏览量=2413
-                result.append("No").append(i).append(":")
-                        .append("  商品ID=").append(currentItem.itemId)
-                        .append("  浏览量=").append(currentItem.viewCount)
-                        .append("\n");
-            }
-            result.append("====================================\n\n");
-
-            // 控制输出频率，模拟实时滚动结果
-            Thread.sleep(1000);
-
-            out.collect(result.toString());
-        }}
+                override def onTimer(
+                                            timestamp: Long,
+                                            ctx: KeyedProcessFunction[Tuple, LoginEvent, String]#OnTimerContext,
+                                            out: Collector[String]): Unit = {
+                        val allLogins: ListBuffer[LoginEvent] = ListBuffer()
+                        //注意事项6
+                        import scala.collection.JavaConversions._
+                        for (elem <- loginState.get) {
+                                allLogins += elem
+                        }
+                        loginState.clear()
+                        println(allLogins.length)
+                        if (allLogins.length > 1) {
+                        		//作为输出
+                                out.collect(allLogins.head.toString)
+                        }
+                }
+        }
 }
+case class LoginEvent(userId: Long, ip: String, eventType: String, eventTime: Long)
+
+
+
+4-------------------
+import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
+import org.apache.flink.streaming.api.TimeCharacteristic
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
+import org.apache.flink.streaming.api.scala.{OutputTag, StreamExecutionEnvironment}
+import org.apache.flink.streaming.api.scala._
+import org.apache.flink.util.Collector
+
+
+object OrderTimeOutWithoutCep {
+
+  val orderTimeOutputTag = new OutputTag[OrderResult]("orderTimeout")
+
+  def main(args: Array[String]): Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+    env.setParallelism(1)
+
+    //读取订单数据
+    val orderEventStream = env.socketTextStream("hadoop102", 7777)
+      .map(data => {
+        val dataArray = data.split(",")
+        OrderEvent(dataArray(0).trim.toLong, dataArray(1).trim, dataArray(2).trim, dataArray(3).trim.toLong)
+      })
+      .assignAscendingTimestamps(_.eventTime * 1000L)
+      .keyBy(_.orderId)
+
+    //定义process function进行超时检测
+    val orderResultStream = orderEventStream
+      .process(new OrderPayMatch())
+
+    orderResultStream.print("payed")
+    orderResultStream.getSideOutput(orderTimeOutputTag).print("timeout")
+
+    env.execute("order timeout without cep job")
+
+  }
+
+  class OrderPayMatch() extends KeyedProcessFunction[Long, OrderEvent, OrderResult] {
+
+    //保存pay是否来过的状态
+    lazy val isPayedState: ValueState[Boolean] = getRuntimeContext.getState(new ValueStateDescriptor[Boolean](
+      "ispayed-state", classOf[Boolean]))
+    //保存定时器的时间戳为状态
+    lazy val timeState: ValueState[Long] = getRuntimeContext.getState(new ValueStateDescriptor[Long](
+      "timer-state", classOf[Long]))
+
+    override def processElement(i: OrderEvent, context: KeyedProcessFunction[Long, OrderEvent, OrderResult]#Context, collector: Collector[OrderResult]): Unit = {
+      //先读取状态
+      val isPayed = isPayedState.value()
+      val timerTs = timeState.value()
+
+      //根据事件的类型进行分类判断，做不同的处理逻辑
+      if (i.eventType == "create") {
+        //1.如果是create事件，接下来判断pay是否来过
+        if ( isPayed ) {
+          //1.1如过已经pay过，匹配成功，输出主流，清空状态
+          collector.collect(OrderResult(i.orderId, "payed successfully"))
+          context.timerService().deleteEventTimeTimer(timerTs)
+          isPayedState.clear()
+          timeState.clear()
+        } else {
+          //如果没有pay过，注册定时器等待pay的到来
+          val ts = i.eventTime * 1000L + 15 * 60 * 1000L
+          context.timerService().registerEventTimeTimer(ts)
+          timeState.update(ts)
+        }
+      } else if (i.eventType == "pay") {
+        //2.如果是pay事件，那么判断是否create过，用timer表示
+        if (timerTs > 0) {
+          //2.1如果有定时器，说明已经有create来过
+          //继续判断，是否超过了timeout时间
+          if (timerTs > i.eventTime * 1000L) {
+            //2.1.1如果定时器时间还没到，那么输出成功匹配  因为是pay先出现 然而前面create加15s 所以这里不加
+            collector.collect(OrderResult(i.orderId, "payed successfully"))
+          } else {
+            //2.1.2如果当前pay的时间已经超时，那么输出到测输出流
+            context.output(orderTimeOutputTag, OrderResult(i.orderId, "payed but already timeout"))
+          }
+          //输出结束，清空状态
+          context.timerService().deleteEventTimeTimer(timerTs)
+          isPayedState.clear()
+          timeState.clear()
+        } else {
+          //2.2pay先到了，更新状态，注册定时器等待create  乱序情况
+          //定时器时间戳：等到水位到了watermark=value.event*1000L 时看create来没来，如果没来则create丢失，因为create应该在pay之前
+          isPayedState.update(true)
+          context.timerService().registerEventTimeTimer(i.eventTime * 1000L)
+          timeState.update(i.eventTime * 1000L)
+        }
+      }
+    }
+
+    override def onTimer(timestamp: Long, ctx: KeyedProcessFunction[Long, OrderEvent, OrderResult]#OnTimerContext, out: Collector[OrderResult]): Unit = {
+      //根据状态的值，判断哪个数据没来
+      if (isPayedState.value()) {
+        //如果为true 表示pay先到，没等到create
+        ctx.output(orderTimeOutputTag, OrderResult(ctx.getCurrentKey, "already payed but not found create log"))
+      } else {
+        //表示create到了，没等到pay
+        ctx.output(orderTimeOutputTag, OrderResult(ctx.getCurrentKey, "order timeout"))
+      }
+      isPayedState.clear()
+      timeState.clear()
+    }
+  }
+}
+
